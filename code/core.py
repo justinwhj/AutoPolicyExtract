@@ -64,9 +64,6 @@ def pSub(p, i_sub):
         del p_sub[i_sub]
     return p_sub
 
-def getSimilarRules():
-    pass
-
 def jacardSim(s1, s2):
     interact = s1 & s2
     union = s1 | s2
@@ -75,12 +72,24 @@ def jacardSim(s1, s2):
 
 def similarity(p1, p2):
     # input: p {"F":set(), "R":set(), "OP":set()}
-    interact = len(p1['F'] & p2['F']) + len(p1['R'] & p2['R']) + len(p1['OP'] & p2['OP'])
-    union = len(p1['F'] | p2['F']) + len(p1['R'] | p2['R']) + len(p1['OP'] | p2['OP'])
+    # interact = len(p1['F'] & p2['F']) + len(p1['R'] & p2['R']) + len(p1['OP'] & p2['OP'])
+    # union = len(p1['F'] | p2['F']) + len(p1['R'] | p2['R']) + len(p1['OP'] | p2['OP'])
+    interact = len(p1['F'] & p2['F']) + len(p1['R'] & p2['R']) 
+    union = len(p1['F'] | p2['F']) + len(p1['R'] | p2['R'])
+
     sim = interact / union
     print("interact is {}".format(interact))
     print("union is {}".format(union))
     return sim
+
+def getSimilarRules(p1, p2):
+    p = {}
+    k = 0
+    for i in p1.keys():
+        for j in p2.keys():
+            if similarity(p1[i], p2[j]) > 0.5:
+                p[i] 
+    return p
 
 def freq_filter(val, feature, df_ci):
     logger.info("freq_filter start feature-val {} {}".format(feature, val))
@@ -275,8 +284,8 @@ class AutomaticPolicyExtraction(object):
                     logger.info("rule pruning {} {}".format(i, j))
                     p_i_temp = pSub(p, i)
                     p_j_temp = pSub(p, j)
-                    q_i = calcQuality(p_i_temp)
-                    q_j = calcQuality(p_j_temp)
+                    q_i = self.calcQuality(p_i_temp)
+                    q_j = self.calcQuality(p_j_temp)
                     if q_i >= q and q_i >= q_j:
                         p = p_i_temp
                     if q_j >= q and q_j >= q_i:
@@ -284,26 +293,32 @@ class AutomaticPolicyExtraction(object):
         logger.info("rule pruning ended")
         return p
     
-    def refine_policy(self):
+    def refine_policy(self, p):
         # TODO: 待实现
-        FNs, FPs, TNs, TPs = getPredict(p, self.dataset)
+        FNs, FPs, _, _ = pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        for i in p.keys():
+            FNs_t, FPs_t, _, _ = getPredict(p[i], self.dataset)
+            FNs = pd.concat((FNs, FNs_t), axis=1)
+            FPs = pd.concat((FPs, FPs_t), axis=1)
+        
         p_fn = self.policy_rules_extraction()
         p_fp = self.policy_rules_extraction()
-        for p_i in pf_fn:
-            R_s = getSimilarRules(p_fn, p)
-            if len(R_s)==0:
-                p = p | p_i
-            else:
-                for p_j in R_s:
-                    p_j = p_j & p_i 
 
-        for p_i in pf_fp:
-            R_s = getSimilarRules(p_fn, p)
-            if len(R_s)==0:
-                p = p | p_i
-            else:
-                for p_j in R_s:
-                    p_j = p_j & p_i 
+        # R_s = getSimilarRules(p_fn, p)
+        # for p_i in p_fn:
+        #     if len(R_s)==0:
+        #         p = p | p_i
+        #     else:
+        #         for p_j in R_s:
+        #             p_j = p_j & p_i 
+
+        # R_s = getSimilarRules(p_fn, p)
+        # for p_i in p_fp:
+        #     if len(R_s)==0:
+        #         p = p | p_i
+        #     else:
+        #         for p_j in R_s:
+        #             p_j = p_j & p_i 
 
     def calcQuality(self, p, cluster="all"):
         alpha = 0.5
@@ -321,7 +336,7 @@ class AutomaticPolicyExtraction(object):
             precision = tp / (tp + fp) if (tp + fp) >0 else 0
             recall = tp / (tp + fn) if (tp + fn) >0 else 0
             acc = (tp + tn) / (fn + fp + tp + tn)
-            f_score = 2 * (precision * recall) / (precision + recall)
+            f_score = 2 * (precision * recall) / (precision + recall) if (precision + recall)>0 else 0
 
             wsc = 0
             for i in range(self.cluster):
@@ -332,7 +347,7 @@ class AutomaticPolicyExtraction(object):
                 self.P_wsc_max_score = wsc 
             
             delta_wsc = (self.P_wsc_max_score - wsc + 1) / self.P_wsc_max_score 
-            Q = 1/((alpha/f_score) + (1-alpha)/delta_wsc)
+            Q = 1/((alpha/f_score) + (1-alpha)/delta_wsc) if f_score>0 else delta_wsc
             return  Q
         else:
             FNs, FPs, TNs, TPs = getPredict(p, self.dataset)
@@ -356,6 +371,9 @@ if __name__ =='__main__':
 
     data = AmazonData()
     data.data_static()
+
     model = AutomaticPolicyExtraction(data)
     p = model.policy_rules_extraction()
     p = model.rule_pruning(p)
+    p = model.refine_policy(p)
+
