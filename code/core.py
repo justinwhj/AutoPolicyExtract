@@ -11,28 +11,40 @@ LABEL_COLUMN = ["ACTION"]
 
 
 def match_pf(pf, item):
+    # 判断item是否满足所有 filter
     for f in pf:
-        for feature in FEATURE_COLUMN:
-            try: 
-                if feature==f[0] and item.get(feature).any()==f[1]:
-                    return 1 
-            except Exception as e:
-                logger.error("{} {} {}".format(feature, f[0], f[1]))
-                logger.error(item)
-                logger.error(e)
-    return 0
+        try: 
+            if (f[2]==1 and item.get(f[0]).any()==f[1]) or (f[2]==-1 and item.get(f[0]).any()!=f[1]):
+                continue
+            else:
+                return 0
+            
+        except Exception as e:
+            logger.error("{} {} {}".format(f[0], f[1], f[2]))
+            logger.error(item)
+            logger.error(e)
+
+    return 1
 
 def match_pr(pr, item):
+    # 判断item是否满足所有 relation
     for r in pr:
-        for feature in FEATURE_COLUMN:
-            if feature==r[0] and item.get(feature).any()==item.get(feature).any():
-                return 1
-    return 0
+        try:
+            if (r[2]==1 and item.get(r[0]).any()==item.get(r[1]).any()) or (r[2]==-1 and item.get(r[0]).any()!=item.get(r[1]).any()):
+                continue
+            else:
+                return 0
+
+        except Exception as e:
+            logger.error("{} {} {}".format(r[0], r[1], r[2]))
+            logger.error(item)
+            logger.error(e)
+    return 1
 
 def decide(p, item):
     match_filter_flag = match_pf(p['F'], item)
     match_relation_flag = match_pr(p['R'], item)
-    logger.info("match_filter {} match_relation {}".format(match_filter_flag, match_relation_flag))
+    # logger.info("match_filter {} match_relation {}".format(match_filter_flag, match_relation_flag))
     if match_filter_flag and match_relation_flag:
         return 1 
     return 0
@@ -99,7 +111,7 @@ def freq_filter(val, feature, df_ci):
     return value_counts[val]
 
 def freq_relation(feature_a, feature_b, df_ci, topic=None):
-    logger.info("{} freq_relation start feature {} {}".format(topic, feature_a, feature_b))
+    # logger.info("{} freq_relation start feature {} {}".format(topic, feature_a, feature_b))
     res = df_ci.apply(lambda x: x[feature_a] == x[feature_b], axis=1)
     return res.sum()
 
@@ -244,21 +256,23 @@ class AutomaticPolicyExtraction(object):
             self.cluster_num = min_cost_k
 
     def extract_attribute_filters(self, cluster_i, A, V, L, threshold_p=0.1, threshold_n=0.1):
-        logger.info("{} extract_attribute_filters start".format(cluster_i))
+        logger.info("cluster {} extract_attribute_filters start".format(cluster_i))
         F_res = set()
         for feature_a in A:
             for value_j in V[feature_a]:
                 if self.freq_filter(value_j, feature_a, cluster_i) - self.freq_filter(value_j, feature_a, 9999)>threshold_p:
-                    F_res.add((feature_a, value_j))
+                    F_res.add((feature_a, value_j, 1))
                 if self.freq_filter(value_j, feature_a, 9999) - self.freq_filter(value_j, feature_a, cluster_i)>threshold_n:
-                    for value_i in V[feature_a]:
-                        if value_i==value_j:
-                            continue
-                        F_res.add((feature_a, value_i))
-        logger.info("{} extract_attribute_filters ended".format(cluster_i))
+                    F_res.add((feature_a, value_j, -1))
+                    # for value_i in V[feature_a]:
+                    #     if value_i==value_j:
+                    #         continue
+                    #     F_res.add((feature_a, value_i))
+        logger.info("cluster {} extract_attribute_filters ended".format(cluster_i))
         return F_res
 
     def extract_relations(self, cluster, C_i, A, L, threshold_p=0.1, threshold_n=0.1):
+        logger.info("cluster {} extract_relations start".format(cluster))
         R_res = set()
         for feature_a in A:
             for feature_b in A:
@@ -267,12 +281,14 @@ class AutomaticPolicyExtraction(object):
                 freq_a_b_c = freq_relation(feature_a, feature_b, C_i, topic=cluster)
                 freq_a_b_l = self.freq_relations_L[(feature_a, feature_b)]
                 if freq_a_b_c - freq_a_b_l >threshold_p:
-                    R_res.add((feature_a, feature_b))
+                    R_res.add((feature_a, feature_b, 1))
                 if freq_a_b_l - freq_a_b_c>threshold_n:
-                    for feature_i in A:
-                        if feature_i == feature_b or feature_i == feature_a:
-                            continue
-                        R_res.add((feature_a, feature_i))
+                    R_res.add((feature_a, feature_b, -1))
+                    # for feature_i in A:
+                    #     if feature_i == feature_b or feature_i == feature_a:
+                    #         continue
+                    #     R_res.add((feature_a, feature_i))
+        logger.info("cluster {} extract_relations ended".format(cluster))
         return R_res
 
     def rule_pruning(self, p):
@@ -295,6 +311,7 @@ class AutomaticPolicyExtraction(object):
     
     def refine_policy(self, p):
         # TODO: 待实现
+        logger.info("refine plolicy start")
         FNs, FPs, _, _ = pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
         for i in p.keys():
             FNs_t, FPs_t, _, _ = getPredict(p[i], self.dataset)
@@ -319,6 +336,7 @@ class AutomaticPolicyExtraction(object):
         #     else:
         #         for p_j in R_s:
         #             p_j = p_j & p_i 
+        logger.info("refine plolicy ended")
 
     def calcQuality(self, p, cluster="all"):
         alpha = 0.5
@@ -348,6 +366,7 @@ class AutomaticPolicyExtraction(object):
             
             delta_wsc = (self.P_wsc_max_score - wsc + 1) / self.P_wsc_max_score 
             Q = 1/((alpha/f_score) + (1-alpha)/delta_wsc) if f_score>0 else delta_wsc
+            logger.warning("Q {} f1-score {} precision {} recall {} wsc {} delta_wsc {}".format(Q, f_score, precision, recall, wsc, delta_wsc))
             return  Q
         else:
             FNs, FPs, TNs, TPs = getPredict(p, self.dataset)
@@ -376,4 +395,3 @@ if __name__ =='__main__':
     p = model.policy_rules_extraction()
     p = model.rule_pruning(p)
     p = model.refine_policy(p)
-
