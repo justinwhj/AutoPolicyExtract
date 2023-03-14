@@ -26,11 +26,16 @@ logger.add("../exp/NUM={}K={}_TP={}_TN={}_RP={}_RN={}_exp.log".format(param_TRAI
 
 def match_pf(pf, item):
     # 判断item是否满足所有 filter
+    judged_feature_list = []
     for f in pf:
         try: 
             # 对于正过滤器 item[feature] |= filter(feature, val) 
             # 对于负过滤器 item[feature] |= filter(feature, !val) 
+            if f[0] in judged_feature_list:
+                continue
+
             if (f[2]==1 and item.get(f[0]).any()==f[1]) or (f[2]==-1 and item.get(f[0]).any()!=f[1]):
+                judged_feature_list.append(f[0])
                 continue
             else:
                 return 0
@@ -44,11 +49,16 @@ def match_pf(pf, item):
 
 def match_pr(pr, item):
     # 判断item是否满足所有 relation
+    judged_feature_list = []
     for r in pr:
         try:
             # 对于正条件 item[feature_a, feature_b] |= relation(feature_a, feature_b) 
             # 对于负条件 item[feature_a, feature_b] |= relation(feature_a, !feature_b) 
+            if r[0] in judged_feature_list:
+                continue
+
             if (r[2]==1 and item.get(r[0]).any()==item.get(r[1]).any()) or (r[2]==-1 and item.get(r[0]).any()!=item.get(r[1]).any()):
+                judged_feature_list.append(r[0])
                 continue
             else:
                 return 0
@@ -364,7 +374,7 @@ class AutomaticPolicyExtraction(object):
         q = self.calcQuality(p)
         exlude_p_list = []
 
-        # 裁剪掉空值
+        # # 裁剪掉空值
         # for key in p.keys():
         #     if len(p[key]['F'])==0 and len(p[key]['R'])==0:
         #         p = pSub(p, key)
