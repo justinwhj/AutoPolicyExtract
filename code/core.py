@@ -9,13 +9,13 @@ from loguru import logger
 FEATURE_COLUMN = ["RESOURCE", "MGR_ID", "ROLE_ROLLUP_1", "ROLE_ROLLUP_2", "ROLE_DEPTNAME", "ROLE_TITLE", "ROLE_FAMILY_DESC", "ROLE_FAMILY", "ROLE_CODE"]
 LABEL_COLUMN = ["ACTION"]
 
-param_K = 3 # 聚类中心数量
+param_K = 15 # 聚类中心数量
 param_TP = 0.5 # attribute filter tp
 param_TN = 0.5 # attribute filter tn
 param_RP = 0.99 # relation condition rp
 param_RN = 0.99 # relation condition rn
 param_TRAIN_NUM = 1000 # 训练数据的数量
-param_Debug = True # debug输出中间结果
+param_Debug = False # debug输出中间结果
 
 logger.add("../exp/NUM={}K={}_TP={}_TN={}_RP={}_RN={}_exp.log".format(param_TRAIN_NUM, param_K, param_TP, param_TN, param_RP, param_RN))
 
@@ -24,6 +24,8 @@ def match_pf(pf, item):
     # 判断item是否满足所有 filter
     for f in pf:
         try: 
+            # 对于正过滤器 item[feature] |= filter(feature, val) 
+            # 对于负过滤器 item[feature] |= filter(feature, !val) 
             if (f[2]==1 and item.get(f[0]).any()==f[1]) or (f[2]==-1 and item.get(f[0]).any()!=f[1]):
                 continue
             else:
@@ -40,6 +42,8 @@ def match_pr(pr, item):
     # 判断item是否满足所有 relation
     for r in pr:
         try:
+            # 对于正条件 item[feature_a, feature_b] |= relation(feature_a, feature_b) 
+            # 对于负条件 item[feature_a, feature_b] |= relation(feature_a, !feature_b) 
             if (r[2]==1 and item.get(r[0]).any()==item.get(r[1]).any()) or (r[2]==-1 and item.get(r[0]).any()!=item.get(r[1]).any()):
                 continue
             else:
@@ -55,7 +59,6 @@ def match_pr(pr, item):
 def decide(p, item):
     match_filter_flag = match_pf(p['F'], item)
     match_relation_flag = match_pr(p['R'], item)
-    # logger.info("match_filter {} match_relation {}".format(match_filter_flag, match_relation_flag))
 
     if param_Debug and match_filter_flag:
         logger.warning("Filter match")
@@ -64,6 +67,7 @@ def decide(p, item):
 
     if match_filter_flag and match_relation_flag:
         return 1 
+    
     return 0
 
 def test_decide():
@@ -73,7 +77,7 @@ def test_decide():
     logger.info(decide(p1, item))
 
 def getPredict(p, dataset):
-    # 针对指定的单条ABAC Role, 测试结果
+    # 功能：针对指定的单条ABAC Role, 测试结果
     preds = []
     for i in range(len(dataset)):
         preds.append(decide(p, dataset[i:i+1]))
@@ -106,8 +110,9 @@ def getPredictV2(Pi, dataset):
 
     return FNs, FPs, TNs, TPs
 
-def WSC(P):
-    wsc = 0.5 * len(P["F"]) + 0.5 * len(P["R"])
+def WSC(p):
+    # 功能： 计算单条策略的加权结构复杂度
+    wsc = 0.5 * len(p["F"]) + 0.5 * len(p["R"])
     return wsc
 
 def pSub(p, i_sub):
@@ -123,6 +128,7 @@ def jacardSim(s1, s2):
     return sim
 
 def similarity(p1, p2):
+    # 功能：计算两个策略之间的相似度
     # input: p {"F":set(), "R":set(), "OP":set()}
     # interact = len(p1['F'] & p2['F']) + len(p1['R'] & p2['R']) + len(p1['OP'] & p2['OP'])
     # union = len(p1['F'] | p2['F']) + len(p1['R'] | p2['R']) + len(p1['OP'] | p2['OP'])
@@ -130,9 +136,7 @@ def similarity(p1, p2):
     union = len(p1['F'] | p2['F']) + len(p1['R'] | p2['R'])
 
     sim = interact / union if union>0 else 0
-    logger.info("interact is {}".format(interact))
-    logger.info("union is {}".format(union))
-    return sim
+    return interact, union, sim
 
 def getSimilarRules(p1, p2):
     p = {}
@@ -144,14 +148,17 @@ def getSimilarRules(p1, p2):
     return p
 
 def freq_filter(val, feature, df_ci):
-    logger.info("freq_filter start feature-val {} {}".format(feature, val))
+    if param_Debug:
+        logger.info("freq_filter start feature-val {} {}".format(feature, val))
+
     value_counts = df_ci[feature].value_counts()
     if val not in value_counts.keys():
         return 0
     return value_counts[val]
 
 def freq_relation(feature_a, feature_b, df_ci, topic=None):
-    # logger.info("{} freq_relation start feature {} {}".format(topic, feature_a, feature_b))
+    if param_Debug:
+        logger.info("{} freq_relation start feature {} {}".format(topic, feature_a, feature_b))
     res = df_ci.apply(lambda x: x[feature_a] == x[feature_b], axis=1)
     freq = res.sum() / len(df_ci) if len(df_ci)>0 else 0
     return freq
@@ -304,10 +311,10 @@ class AutomaticPolicyExtraction(object):
                 freq_a_b_l = self.freq_filter(value_j, feature_a, 9999)
 
                 if freq_a_b_c - freq_a_b_l>threshold_p:
-                    logger.error("pos filter =  freq_a_b_c :{} freq_a_b_l:{}".format(freq_a_b_c, freq_a_b_l))
+                    logger.warning("pos filter =  freq_a_b_c :{} freq_a_b_l:{}".format(freq_a_b_c, freq_a_b_l))
                     F_res.add((feature_a, value_j, 1))
                 if freq_a_b_l - freq_a_b_c >threshold_n:
-                    logger.error("neg filter =  freq_a_b_c :{} freq_a_b_l:{}".format(freq_a_b_c, freq_a_b_l))
+                    logger.warning("neg filter =  freq_a_b_c :{} freq_a_b_l:{}".format(freq_a_b_c, freq_a_b_l))
                     F_res.add((feature_a, value_j, -1))
         
         logger.info("cluster {} extract_attribute_filters ended".format(cluster_i))
@@ -324,10 +331,10 @@ class AutomaticPolicyExtraction(object):
                 freq_a_b_l = self.freq_relations_L[(feature_a, feature_b)]
 
                 if freq_a_b_c - freq_a_b_l >threshold_p:
-                    logger.error("pos relation =  freq_a_b_c :{} freq_a_b_l:{}".format(freq_a_b_c, freq_a_b_l))
+                    logger.warning("pos relation =  freq_a_b_c :{} freq_a_b_l:{}".format(freq_a_b_c, freq_a_b_l))
                     R_res.add((feature_a, feature_b, 1))
                 if freq_a_b_l - freq_a_b_c>threshold_n:
-                    logger.error("neg relation = freq_a_b_c :{} freq_a_b_l:{}".format(freq_a_b_l, freq_a_b_c))
+                    logger.warning("neg relation = freq_a_b_c :{} freq_a_b_l:{}".format(freq_a_b_l, freq_a_b_c))
                     R_res.add((feature_a, feature_b, -1))
 
         logger.info("cluster {} extract_relations ended".format(cluster))
@@ -336,9 +343,15 @@ class AutomaticPolicyExtraction(object):
     def rule_pruning(self, p):
         logger.info("rule pruning start")
         q = self.calcQuality(p)
+        exlude_p_list = []
         for i in range(self.cluster):
             for j in range(i+1, self.cluster):
-                if similarity(p[i], p[j])>0.5:
+                # 如果该策略已被裁剪掉了，则跳过
+                if i in exlude_p_list or j in exlude_p_list:
+                    continue
+                interact, union, sim = similarity(p[i], p[j])
+                logger.warning("policy {}, {} interact:{}, union:{} similarity:{}".format(i, j, interact, union, sim))
+                if sim>0.5:
                     logger.info("rule pruning {} {}".format(i, j))
                     p_i_temp = pSub(p, i)
                     p_j_temp = pSub(p, j)
@@ -346,8 +359,10 @@ class AutomaticPolicyExtraction(object):
                     q_j = self.calcQuality(p_j_temp)
                     if q_i >= q and q_i >= q_j:
                         p = p_i_temp
+                        exlude_p_list.append(i)
                     if q_j >= q and q_j >= q_i:
                         p = p_j_temp
+                        exlude_p_list.append(j)
         logger.info("rule pruning ended")
         return p
     
