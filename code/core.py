@@ -9,6 +9,16 @@ from loguru import logger
 FEATURE_COLUMN = ["RESOURCE", "MGR_ID", "ROLE_ROLLUP_1", "ROLE_ROLLUP_2", "ROLE_DEPTNAME", "ROLE_TITLE", "ROLE_FAMILY_DESC", "ROLE_FAMILY", "ROLE_CODE"]
 LABEL_COLUMN = ["ACTION"]
 
+param_K = 3 # 聚类中心数量
+param_TP = 0.5 # attribute filter tp
+param_TN = 0.5 # attribute filter tn
+param_RP = 0.99 # relation condition rp
+param_RN = 0.99 # relation condition rn
+param_TRAIN_NUM = 1000 # 训练数据的数量
+param_Debug = True # debug输出中间结果
+
+logger.add("../exp/NUM={}K={}_TP={}_TN={}_RP={}_RN={}_exp.log".format(param_TRAIN_NUM, param_K, param_TP, param_TN, param_RP, param_RN))
+
 
 def match_pf(pf, item):
     # 判断item是否满足所有 filter
@@ -39,12 +49,19 @@ def match_pr(pr, item):
             logger.error("{} {} {}".format(r[0], r[1], r[2]))
             logger.error(item)
             logger.error(e)
+
     return 1
 
 def decide(p, item):
     match_filter_flag = match_pf(p['F'], item)
     match_relation_flag = match_pr(p['R'], item)
     # logger.info("match_filter {} match_relation {}".format(match_filter_flag, match_relation_flag))
+
+    if param_Debug and match_filter_flag:
+        logger.warning("Filter match")
+    if param_Debug and match_relation_flag:
+        logger.warning("Relation match")
+
     if match_filter_flag and match_relation_flag:
         return 1 
     return 0
@@ -56,6 +73,7 @@ def test_decide():
     logger.info(decide(p1, item))
 
 def getPredict(p, dataset):
+    # 针对指定的单条ABAC Role, 测试结果
     preds = []
     for i in range(len(dataset)):
         preds.append(decide(p, dataset[i:i+1]))
@@ -64,6 +82,28 @@ def getPredict(p, dataset):
     FPs = preds_data.query('preds=={} and ACTION=={}'.format(0, 1))
     TNs = preds_data.query('preds=={} and ACTION=={}'.format(0, 0))
     TPs = preds_data.query('preds=={} and ACTION=={}'.format(1, 1))
+    return FNs, FPs, TNs, TPs
+
+def getPredictV2(Pi, dataset):
+    # 功能：针对指定的ABAC Policy, 测试dataset中所有request的授权结果
+    # 原理：对于单个request, 存在规则p属于策略Pi, 使得item|=p, 则允许该request的请求
+    preds = []
+    for i in range(len(dataset)):
+        allow = 0
+        for j in Pi.keys():
+            allow = allow | decide(Pi[j], dataset[i:i+1]) # 因为这边用的是 |, 因此decide全为0 
+        preds.append(1 if allow else 0)
+
+    preds_data = pd.concat((pd.DataFrame({"preds": preds}), dataset), axis=1)  
+    FNs = preds_data.query('preds=={} and ACTION=={}'.format(1, 0))
+    FPs = preds_data.query('preds=={} and ACTION=={}'.format(0, 1)) # 0 1
+    TNs = preds_data.query('preds=={} and ACTION=={}'.format(0, 0)) # 0 0 也就是说这玩意全部预测为0了
+    TPs = preds_data.query('preds=={} and ACTION=={}'.format(1, 1)) 
+
+    Pos = preds_data.query('ACTION=={}'.format(1)) 
+    Neg = preds_data.query('ACTION=={}'.format(0)) 
+    logger.info("pos: {} neg:{}".format(len(Pos), len(Neg)))
+
     return FNs, FPs, TNs, TPs
 
 def WSC(P):
@@ -89,9 +129,9 @@ def similarity(p1, p2):
     interact = len(p1['F'] & p2['F']) + len(p1['R'] & p2['R']) 
     union = len(p1['F'] | p2['F']) + len(p1['R'] | p2['R'])
 
-    sim = interact / union
-    print("interact is {}".format(interact))
-    print("union is {}".format(union))
+    sim = interact / union if union>0 else 0
+    logger.info("interact is {}".format(interact))
+    logger.info("union is {}".format(union))
     return sim
 
 def getSimilarRules(p1, p2):
@@ -113,13 +153,13 @@ def freq_filter(val, feature, df_ci):
 def freq_relation(feature_a, feature_b, df_ci, topic=None):
     # logger.info("{} freq_relation start feature {} {}".format(topic, feature_a, feature_b))
     res = df_ci.apply(lambda x: x[feature_a] == x[feature_b], axis=1)
-    return res.sum()
-
+    freq = res.sum() / len(df_ci) if len(df_ci)>0 else 0
+    return freq
 
 class AmazonData(object):
-    def __init__(self, data_path="../data/amazon"):
+    def __init__(self, data_path="../data/amazon", num=None):
         try:
-            self.train_set = pd.read_csv(os.path.join(data_path, "train.csv"))[0:100]
+            self.train_set = pd.read_csv(os.path.join(data_path, "train.csv"))[0:num] if num is not None else pd.read_csv(os.path.join(data_path, "train.csv"))
             self.test_set = pd.read_csv(os.path.join(data_path, "test.csv"))
             self.train_x, self.train_y = self.train_set[FEATURE_COLUMN], self.train_set[LABEL_COLUMN]
             self.test_x = self.test_set[FEATURE_COLUMN]
@@ -255,23 +295,25 @@ class AutomaticPolicyExtraction(object):
             logger.info("best k: {}, best score:{}".format(min_cost_k, min_score))
             self.cluster_num = min_cost_k
 
-    def extract_attribute_filters(self, cluster_i, A, V, L, threshold_p=0.1, threshold_n=0.1):
+    def extract_attribute_filters(self, cluster_i, A, V, L, threshold_p=param_TP, threshold_n=param_TN):
         logger.info("cluster {} extract_attribute_filters start".format(cluster_i))
         F_res = set()
         for feature_a in A:
             for value_j in V[feature_a]:
-                if self.freq_filter(value_j, feature_a, cluster_i) - self.freq_filter(value_j, feature_a, 9999)>threshold_p:
+                freq_a_b_c = self.freq_filter(value_j, feature_a, cluster_i)
+                freq_a_b_l = self.freq_filter(value_j, feature_a, 9999)
+
+                if freq_a_b_c - freq_a_b_l>threshold_p:
+                    logger.error("pos filter =  freq_a_b_c :{} freq_a_b_l:{}".format(freq_a_b_c, freq_a_b_l))
                     F_res.add((feature_a, value_j, 1))
-                if self.freq_filter(value_j, feature_a, 9999) - self.freq_filter(value_j, feature_a, cluster_i)>threshold_n:
+                if freq_a_b_l - freq_a_b_c >threshold_n:
+                    logger.error("neg filter =  freq_a_b_c :{} freq_a_b_l:{}".format(freq_a_b_c, freq_a_b_l))
                     F_res.add((feature_a, value_j, -1))
-                    # for value_i in V[feature_a]:
-                    #     if value_i==value_j:
-                    #         continue
-                    #     F_res.add((feature_a, value_i))
+        
         logger.info("cluster {} extract_attribute_filters ended".format(cluster_i))
         return F_res
 
-    def extract_relations(self, cluster, C_i, A, L, threshold_p=0.1, threshold_n=0.1):
+    def extract_relations(self, cluster, C_i, A, L, threshold_p=param_RP, threshold_n=param_RN):
         logger.info("cluster {} extract_relations start".format(cluster))
         R_res = set()
         for feature_a in A:
@@ -280,14 +322,14 @@ class AutomaticPolicyExtraction(object):
                     continue
                 freq_a_b_c = freq_relation(feature_a, feature_b, C_i, topic=cluster)
                 freq_a_b_l = self.freq_relations_L[(feature_a, feature_b)]
+
                 if freq_a_b_c - freq_a_b_l >threshold_p:
+                    logger.error("pos relation =  freq_a_b_c :{} freq_a_b_l:{}".format(freq_a_b_c, freq_a_b_l))
                     R_res.add((feature_a, feature_b, 1))
                 if freq_a_b_l - freq_a_b_c>threshold_n:
+                    logger.error("neg relation = freq_a_b_c :{} freq_a_b_l:{}".format(freq_a_b_l, freq_a_b_c))
                     R_res.add((feature_a, feature_b, -1))
-                    # for feature_i in A:
-                    #     if feature_i == feature_b or feature_i == feature_a:
-                    #         continue
-                    #     R_res.add((feature_a, feature_i))
+
         logger.info("cluster {} extract_relations ended".format(cluster))
         return R_res
 
@@ -312,14 +354,14 @@ class AutomaticPolicyExtraction(object):
     def refine_policy(self, p):
         # TODO: 待实现
         logger.info("refine plolicy start")
-        FNs, FPs, _, _ = pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-        for i in p.keys():
-            FNs_t, FPs_t, _, _ = getPredict(p[i], self.dataset)
-            FNs = pd.concat((FNs, FNs_t), axis=1)
-            FPs = pd.concat((FPs, FPs_t), axis=1)
+        # FNs, FPs, _, _ = pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        # for i in p.keys():
+        #     FNs_t, FPs_t, _, _ = getPredict(p[i], self.dataset)
+        #     FNs = pd.concat((FNs, FNs_t), axis=1)
+        #     FPs = pd.concat((FPs, FPs_t), axis=1)
         
-        p_fn = self.policy_rules_extraction()
-        p_fp = self.policy_rules_extraction()
+        # p_fn = self.policy_rules_extraction()
+        # p_fp = self.policy_rules_extraction()
 
         # R_s = getSimilarRules(p_fn, p)
         # for p_i in p_fn:
@@ -341,15 +383,8 @@ class AutomaticPolicyExtraction(object):
     def calcQuality(self, p, cluster="all"):
         alpha = 0.5
         if cluster=="all":
-            fn, fp, tn, tp = 0, 0, 0, 0
-            for i in p.keys():
-                # 每条规则都应该是全局可使用的
-                FNs, FPs, TNs, TPs = getPredict(p[i], self.dataset)
-                fn += len(FNs)
-                fp += len(FPs)
-                tn += len(TNs)
-                tp += len(TPs)
-
+            FNs, FPs, TNs, TPs = getPredictV2(p, self.dataset)
+            fn, fp, tn, tp = len(FNs), len(FPs), len(TNs), len(TPs)
             logger.info("fn fp tn tp {} {} {} {}".format(fn, fp, tn, tp))
             precision = tp / (tp + fp) if (tp + fp) >0 else 0
             recall = tp / (tp + fn) if (tp + fn) >0 else 0
@@ -357,8 +392,8 @@ class AutomaticPolicyExtraction(object):
             f_score = 2 * (precision * recall) / (precision + recall) if (precision + recall)>0 else 0
 
             wsc = 0
-            for i in range(self.cluster):
-                wsc += WSC(p[i])
+            for key in p.keys():
+                wsc += WSC(p[key])
             
             if self.P_wsc_max==None or wsc > self.P_wsc_max_score:
                 self.P_wsc_max = p 
@@ -387,11 +422,10 @@ class AutomaticPolicyExtraction(object):
 
 if __name__ =='__main__':
     # test_decide()
-
-    data = AmazonData()
+    data = AmazonData(num=param_TRAIN_NUM)
     data.data_static()
 
-    model = AutomaticPolicyExtraction(data)
+    model = AutomaticPolicyExtraction(data, param_K)
     p = model.policy_rules_extraction()
     p = model.rule_pruning(p)
     p = model.refine_policy(p)

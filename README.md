@@ -1,5 +1,8 @@
 # An auto ABAC policy extraction
-# 运行
+
+# 参考文献
+https://arxiv.org/abs/2003.07270
+# 代码运行
 python ./code/core.py
 
 # 算法流程
