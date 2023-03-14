@@ -183,6 +183,8 @@ class AmazonData(object):
         try:
             self.train_set = pd.read_csv(os.path.join(data_path, "train.csv"))[0:num] if num is not None else pd.read_csv(os.path.join(data_path, "train.csv"))
             self.test_set = pd.read_csv(os.path.join(data_path, "test.csv"))
+            self._data_preprocess()
+
             self.train_x, self.train_y = self.train_set[FEATURE_COLUMN], self.train_set[LABEL_COLUMN]
             self.test_x = self.test_set[FEATURE_COLUMN]
         except:
@@ -190,6 +192,10 @@ class AmazonData(object):
         
         logger.info(self.train_set.head(5))
     
+    def _data_preprocess(self):
+        for key in FEATURE_COLUMN:
+            self.train_set[key], cut_bin = pd.qcut(self.train_set[key], q=10, labels=False, retbins=True, duplicates="drop")
+
     def data_static(self): 
         static_res = {}
         for key in FEATURE_COLUMN:
@@ -358,7 +364,7 @@ class AutomaticPolicyExtraction(object):
         q = self.calcQuality(p)
         exlude_p_list = []
 
-        # # 裁剪掉空值
+        # 裁剪掉空值
         # for key in p.keys():
         #     if len(p[key]['F'])==0 and len(p[key]['R'])==0:
         #         p = pSub(p, key)
