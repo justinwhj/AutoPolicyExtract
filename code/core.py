@@ -6,6 +6,8 @@ from kmodes.kmodes import KModes
 from sklearn.cluster import KMeans
 from loguru import logger
 
+# TODO: 需要对数据进行预处理
+
 FEATURE_COLUMN = ["RESOURCE", "MGR_ID", "ROLE_ROLLUP_1", "ROLE_ROLLUP_2", "ROLE_DEPTNAME", "ROLE_TITLE", "ROLE_FAMILY_DESC", "ROLE_FAMILY", "ROLE_CODE"]
 LABEL_COLUMN = ["ACTION"]
 
@@ -121,6 +123,11 @@ def pSub(p, i_sub):
         del p_sub[i_sub]
     return p_sub
 
+def AddP(P, p_add):
+    max_index = max(P.keys())
+    P[max_index+1] = p_add.copy()
+    return 
+
 def jacardSim(s1, s2):
     interact = s1 & s2
     union = s1 | s2
@@ -139,12 +146,13 @@ def similarity(p1, p2):
     return interact, union, sim
 
 def getSimilarRules(p1, p2):
-    p = {}
-    k = 0
+    p = []
     for i in p1.keys():
         for j in p2.keys():
-            if similarity(p1[i], p2[j]) > 0.5:
-                p[i] 
+            _, _, sim = similarity(p1[i], p2[j])
+            if sim > 0.5:
+                p.append((i, j))
+    logger.warning("get similar rule pairs {}".format(len(p)))
     return p
 
 def freq_filter(val, feature, df_ci):
@@ -162,6 +170,10 @@ def freq_relation(feature_a, feature_b, df_ci, topic=None):
     res = df_ci.apply(lambda x: x[feature_a] == x[feature_b], axis=1)
     freq = res.sum() / len(df_ci) if len(df_ci)>0 else 0
     return freq
+
+def trans_df2np(train_set):
+    train_x, train_y = train_set[FEATURE_COLUMN], train_set[LABEL_COLUMN]
+    return np.array(train_x), np.array(train_y).ravel()
 
 class AmazonData(object):
     def __init__(self, data_path="../data/amazon", num=None):
@@ -193,31 +205,9 @@ class AmazonData(object):
     
 
 class AutomaticPolicyExtraction(object):
-    def __init__(self, dataset, cluster=2):
-        self.cluster = cluster
+    def __init__(self, dataset):
         self.dataset = dataset.train_set
-        train_data, _= data.get_data()
-        label, cost = self.cluster_data(train_data, cluster, algo="kmodes")
-        self.dataset = pd.concat((pd.DataFrame({"cluster_k":label}), self.dataset), axis=1)
-
-        C_dict = {}
-        C_dict_freq = {}
-        C_dict_hist = {}
-        for i in range(self.cluster):
-            C_dict[i] = self.dataset.query('cluster_k=={}'.format(i))
-            C_dict_freq[i] = {}
-            C_dict_hist[i] = len(C_dict[i])
-            for feature in FEATURE_COLUMN:
-                C_dict_freq[i][feature] = C_dict[i][feature].value_counts().to_dict()
-               
-        C_dict_freq[9999] = {}
-        C_dict_hist[9999] = len(self.dataset)
-        for feature in FEATURE_COLUMN:
-            C_dict_freq[9999][feature] = self.dataset[feature].value_counts().to_dict()
-        self.C_dict = C_dict
-        self.C_dict_freq = C_dict_freq
-        self.C_dict_hist = C_dict_hist
-
+        
         self.freq_relations_L = {}
         for feature_a in FEATURE_COLUMN:
             for feature_b in FEATURE_COLUMN:
@@ -236,23 +226,42 @@ class AutomaticPolicyExtraction(object):
         self.P_wsc_max = None 
         self.P_wsc_max_score = 1
 
-    def freq_filter(self, val, feature, cluster_k):
-        value_counts = self.C_dict_freq[cluster_k][feature]
-        cluster_k_hist = self.C_dict_hist[cluster_k]
+    def freq_filter(self, val, feature, cluster_k, C_dict_freq, C_dict_hist):
+        value_counts = C_dict_freq[cluster_k][feature]
+        cluster_k_hist = C_dict_hist[cluster_k]
         if val not in value_counts.keys():
             return 0
         return value_counts[val] / cluster_k_hist
 
-    def policy_rules_extraction(self):
+    def policy_rules_extraction(self, train_data, cluster):
+        label, cost = self.cluster_data(train_data, cluster, algo="kmodes")
+        dataset = pd.concat((pd.DataFrame({"cluster_k":label}), self.dataset), axis=1)
+
+        C_dict = {}
+        C_dict_freq = {}
+        C_dict_hist = {}
+        for i in range(cluster):
+            C_dict[i] = dataset.query('cluster_k=={}'.format(i))
+            C_dict_freq[i] = {}
+            C_dict_hist[i] = len(C_dict[i])
+            for feature in FEATURE_COLUMN:
+                C_dict_freq[i][feature] = C_dict[i][feature].value_counts().to_dict()
+               
+        C_dict_freq[9999] = {}
+        C_dict_hist[9999] = len(dataset)
+        for feature in FEATURE_COLUMN:
+            C_dict_freq[9999][feature] = dataset[feature].value_counts().to_dict()
+
         P_dict = {}
-        for i in range(self.cluster):
-            C_i = self.C_dict[i]
-            F_res = self.extract_attribute_filters(i, self.A, self.V, self.L)
+        for i in range(cluster):
+            C_i = C_dict[i]
+            F_res = self.extract_attribute_filters(i, self.A, self.V, self.L, C_dict_freq, C_dict_hist)
             R_res = self.extract_relations(i, C_i, self.A, self.L)
             P_dict[i] = {"F": F_res, "R": R_res}
             logger.info("F_res: {}".format(F_res))
             logger.info("R_res: {}".format(R_res))
-        return P_dict
+
+        return P_dict, C_dict, C_dict_freq, C_dict_hist, label, cluster
 
     def cluster_data(self, data, k, algo="kmeans"):
         logger.info("cluster_data start")
@@ -302,13 +311,13 @@ class AutomaticPolicyExtraction(object):
             logger.info("best k: {}, best score:{}".format(min_cost_k, min_score))
             self.cluster_num = min_cost_k
 
-    def extract_attribute_filters(self, cluster_i, A, V, L, threshold_p=param_TP, threshold_n=param_TN):
+    def extract_attribute_filters(self, cluster_i, A, V, L, C_dict_freq, C_dict_hist, threshold_p=param_TP, threshold_n=param_TN):
         logger.info("cluster {} extract_attribute_filters start".format(cluster_i))
         F_res = set()
         for feature_a in A:
             for value_j in V[feature_a]:
-                freq_a_b_c = self.freq_filter(value_j, feature_a, cluster_i)
-                freq_a_b_l = self.freq_filter(value_j, feature_a, 9999)
+                freq_a_b_c = self.freq_filter(value_j, feature_a, cluster_i, C_dict_freq, C_dict_hist)
+                freq_a_b_l = self.freq_filter(value_j, feature_a, 9999, C_dict_freq, C_dict_hist)
 
                 if freq_a_b_c - freq_a_b_l>threshold_p:
                     logger.warning("pos filter =  freq_a_b_c :{} freq_a_b_l:{}".format(freq_a_b_c, freq_a_b_l))
@@ -340,17 +349,26 @@ class AutomaticPolicyExtraction(object):
         logger.info("cluster {} extract_relations ended".format(cluster))
         return R_res
 
-    def rule_pruning(self, p):
+    def rule_pruning(self, p, cluster):
+        # 策略剪枝
         logger.info("rule pruning start")
         q = self.calcQuality(p)
         exlude_p_list = []
-        for i in range(self.cluster):
-            for j in range(i+1, self.cluster):
+
+        # 裁剪掉空值
+        for key in p.keys():
+            if len(p[key]['F'])==0 and len(p[key]['R'])==0:
+                p = pSub(p, key)
+                exlude_p_list.append(key)
+
+        for i in range(cluster):
+            for j in range(i+1, cluster):
                 # 如果该策略已被裁剪掉了，则跳过
                 if i in exlude_p_list or j in exlude_p_list:
                     continue
                 interact, union, sim = similarity(p[i], p[j])
                 logger.warning("policy {}, {} interact:{}, union:{} similarity:{}".format(i, j, interact, union, sim))
+                # 如果两个策略相似度大于sim, 则裁剪掉其中质量差的
                 if sim>0.5:
                     logger.info("rule pruning {} {}".format(i, j))
                     p_i_temp = pSub(p, i)
@@ -363,84 +381,83 @@ class AutomaticPolicyExtraction(object):
                     if q_j >= q and q_j >= q_i:
                         p = p_j_temp
                         exlude_p_list.append(j)
-        logger.info("rule pruning ended")
+
+        logger.info("rule pruning ended: {}".format(p))
+        self.calcQuality(p)
         return p
     
-    def refine_policy(self, p):
-        # TODO: 待实现
+    def refine_policy(self, P, cluster):
+        # 策略优化
         logger.info("refine plolicy start")
-        # FNs, FPs, _, _ = pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-        # for i in p.keys():
-        #     FNs_t, FPs_t, _, _ = getPredict(p[i], self.dataset)
-        #     FNs = pd.concat((FNs, FNs_t), axis=1)
-        #     FPs = pd.concat((FPs, FPs_t), axis=1)
+        FNs, FPs, _, _ = getPredictV2(P, self.dataset)
+
+        if len(FNs)>0:
+            logger.warning("refine_policy FNs: {}".format(len(FNs)))
+            train_x_fn, _ = trans_df2np(FNs)
+            P_fn, _, _, _, _, _ = self.policy_rules_extraction(train_x_fn, cluster)
+            Rs = getSimilarRules(P_fn, P)
+
+            for key in P_fn.keys():
+                # 没有找到的规则，增加
+                if len(Rs)==0 and P is not None:
+                    logger.warning("refine_policy add P_fn:{}".format(key))
+                    P = AddP(P, P_fn[key])
+                else:
+                    for i, j in Rs:
+                        # 去掉额外的一些规则
+                        logger.warning("refine_policy cut P_fn {} {}".format(i, j))
+                        P[j]['F'] = P[j]['F'] - (P[j]['F'] - P_fn[i]['F'])
+                        P[j]['R'] = P[j]['R'] - (P[j]['R'] - P_fn[i]['R'])
         
-        # p_fn = self.policy_rules_extraction()
-        # p_fp = self.policy_rules_extraction()
+        if len(FPs)>0:
+            logger.warning("refine_policy FPs: {}".format(len(FPs)))
+            train_x_fp, _ = trans_df2np(FPs)
+            P_fp, _, _, _, _, _ = self.policy_rules_extraction(train_x_fp, cluster)
+            Rs = getSimilarRules(P_fp, P)
 
-        # R_s = getSimilarRules(p_fn, p)
-        # for p_i in p_fn:
-        #     if len(R_s)==0:
-        #         p = p | p_i
-        #     else:
-        #         for p_j in R_s:
-        #             p_j = p_j & p_i 
+            for key in P_fp.keys():
+                if len(Rs)>0:
+                    for i, j in Rs:
+                        # 增加一些规则
+                        logger.warning("refine_policy cut P_fp {} {}".format(i, j))
+                        P[j]['F'] = P[j]['F'] | (P_fp[i]['F'] - P[j]['F'])
+                        P[j]['R'] = P[j]['R'] | (P_fp[i]['R'] - P[j]['R'])
 
-        # R_s = getSimilarRules(p_fn, p)
-        # for p_i in p_fp:
-        #     if len(R_s)==0:
-        #         p = p | p_i
-        #     else:
-        #         for p_j in R_s:
-        #             p_j = p_j & p_i 
-        logger.info("refine plolicy ended")
+        logger.info("refine plolicy ended: {}".format(P))
+        self.calcQuality(P)
 
-    def calcQuality(self, p, cluster="all"):
+    def calcQuality(self, P):
         alpha = 0.5
-        if cluster=="all":
-            FNs, FPs, TNs, TPs = getPredictV2(p, self.dataset)
-            fn, fp, tn, tp = len(FNs), len(FPs), len(TNs), len(TPs)
-            logger.info("fn fp tn tp {} {} {} {}".format(fn, fp, tn, tp))
-            precision = tp / (tp + fp) if (tp + fp) >0 else 0
-            recall = tp / (tp + fn) if (tp + fn) >0 else 0
-            acc = (tp + tn) / (fn + fp + tp + tn)
-            f_score = 2 * (precision * recall) / (precision + recall) if (precision + recall)>0 else 0
+        FNs, FPs, TNs, TPs = getPredictV2(P, self.dataset)
+        fn, fp, tn, tp = len(FNs), len(FPs), len(TNs), len(TPs)
+        logger.info("fn fp tn tp {} {} {} {}".format(fn, fp, tn, tp))
+        precision = tp / (tp + fp) if (tp + fp) >0 else 0
+        recall = tp / (tp + fn) if (tp + fn) >0 else 0
+        acc = (tp + tn) / (fn + fp + tp + tn)
+        f_score = 2 * (precision * recall) / (precision + recall) if (precision + recall)>0 else 0
 
-            wsc = 0
-            for key in p.keys():
-                wsc += WSC(p[key])
-            
-            if self.P_wsc_max==None or wsc > self.P_wsc_max_score:
-                self.P_wsc_max = p 
-                self.P_wsc_max_score = wsc 
-            
-            delta_wsc = (self.P_wsc_max_score - wsc + 1) / self.P_wsc_max_score 
-            Q = 1/((alpha/f_score) + (1-alpha)/delta_wsc) if f_score>0 else delta_wsc
-            logger.warning("Q {} f1-score {} precision {} recall {} wsc {} delta_wsc {}".format(Q, f_score, precision, recall, wsc, delta_wsc))
-            return  Q
-        else:
-            FNs, FPs, TNs, TPs = getPredict(p, self.dataset)
-            fn, fp, tn, tp = len(FNs), len(FPs), len(TNs), len(TPs)
-            precision = tp / (tp + fp)
-            recall = tp / (tp + fn)
-            acc = (tp + tn) / (fn + fp + tp + tn)
-            f_score = 2 * (precision * recall) / (precision + recall)
-            wsc = WSC(p)
+        wsc = 0
+        for key in P.keys():
+            wsc += WSC(P[key])
+        if wsc==0:
+            logger.error("calcQuality P wsc is 0")
 
-            if self.P_wsc_max==None or wsc > self.P_wsc_max_score:
-                self.P_wsc_max = p 
-                self.P_wsc_max_score = wsc 
-            
-            delta_wsc = (self.P_wsc_max_score - wsc + 1) / self.P_wsc_max_score 
-            Q = 1/((alpha/f_score) + (1-alpha)/delta_wsc)
-            return  Q
+        if self.P_wsc_max==None or (wsc > self.P_wsc_max_score and wsc>0):
+            self.P_wsc_max = P 
+            self.P_wsc_max_score = wsc 
+        
+        delta_wsc = (self.P_wsc_max_score - wsc + 1) / self.P_wsc_max_score
+        Q = 1/((alpha/f_score) + (1-alpha)/delta_wsc) if f_score>0 else delta_wsc
+        logger.warning("Q {} f1-score {} precision {} recall {} wsc {} delta_wsc {}".format(Q, f_score, precision, recall, wsc, delta_wsc))
+        return  Q
 
 if __name__ =='__main__':
     # test_decide()
     data = AmazonData(num=param_TRAIN_NUM)
     data.data_static()
+    train_data, _= data.get_data()
 
-    model = AutomaticPolicyExtraction(data, param_K)
-    p = model.policy_rules_extraction()
-    p = model.rule_pruning(p)
-    p = model.refine_policy(p)
+    model = AutomaticPolicyExtraction(data)
+    P_dict, _, _, _, _, _ = model.policy_rules_extraction(train_data, param_K)
+    P_dict = model.rule_pruning(P_dict, param_K)
+    P_dict = model.refine_policy(P_dict, param_K)
