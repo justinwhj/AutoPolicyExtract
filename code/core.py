@@ -6,7 +6,9 @@ from kmodes.kmodes import KModes
 from sklearn.cluster import KMeans
 from loguru import logger
 
-# TODO: 需要对数据进行预处理
+# TODO: 
+# 1.需要对数据进行预处理
+# 2.剪枝和优化的测试
 
 FEATURE_COLUMN = ["RESOURCE", "MGR_ID", "ROLE_ROLLUP_1", "ROLE_ROLLUP_2", "ROLE_DEPTNAME", "ROLE_TITLE", "ROLE_FAMILY_DESC", "ROLE_FAMILY", "ROLE_CODE"]
 LABEL_COLUMN = ["ACTION"]
@@ -124,9 +126,10 @@ def pSub(p, i_sub):
     return p_sub
 
 def AddP(P, p_add):
+    p_res = P.copy()
     max_index = max(P.keys())
-    P[max_index+1] = p_add.copy()
-    return 
+    p_res[max_index+1] = p_add.copy()
+    return p_res
 
 def jacardSim(s1, s2):
     interact = s1 & s2
@@ -355,11 +358,11 @@ class AutomaticPolicyExtraction(object):
         q = self.calcQuality(p)
         exlude_p_list = []
 
-        # 裁剪掉空值
-        for key in p.keys():
-            if len(p[key]['F'])==0 and len(p[key]['R'])==0:
-                p = pSub(p, key)
-                exlude_p_list.append(key)
+        # # 裁剪掉空值
+        # for key in p.keys():
+        #     if len(p[key]['F'])==0 and len(p[key]['R'])==0:
+        #         p = pSub(p, key)
+        #         exlude_p_list.append(key)
 
         for i in range(cluster):
             for j in range(i+1, cluster):
