@@ -374,11 +374,11 @@ class AutomaticPolicyExtraction(object):
         q = self.calcQuality(p)
         exlude_p_list = []
 
-        # # 裁剪掉空值
-        # for key in p.keys():
-        #     if len(p[key]['F'])==0 and len(p[key]['R'])==0:
-        #         p = pSub(p, key)
-        #         exlude_p_list.append(key)
+        # 裁剪掉空值
+        for key in p.keys():
+            if len(p[key]['F'])==0 and len(p[key]['R'])==0:
+                p = pSub(p, key)
+                exlude_p_list.append(key)
 
         for i in range(cluster):
             for j in range(i+1, cluster):
